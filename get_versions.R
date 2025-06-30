@@ -1,0 +1,1 @@
+print(installed.packages()[,c('Package', 'Version')])

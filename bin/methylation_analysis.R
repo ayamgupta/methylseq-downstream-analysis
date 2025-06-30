@@ -1,0 +1,248 @@
+#!/usr/bin/env Rscript
+
+# Load necessary libraries
+suppressPackageStartupMessages({
+  library(argparse)
+  library(methylKit)
+  library(dplyr)
+  library(genomation)
+  library(GenomicRanges)
+  library(txdbmaker)
+  library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+  library(ChIPpeakAnno)
+  library(org.Hs.eg.db)
+  library(enrichR)
+  library(purrr)
+  library(tidyr)
+  library(readr)
+})
+
+# Function to parse command-line arguments
+get_args <- function() {
+  parser <- ArgumentParser(description = "Run methylation analysis pipeline.")
+  
+  parser$add_argument("--metadata_csv", type = "character", default = "samplesheet.csv", help = "Path to sample sheet CSV file")
+  parser$add_argument("--base_dir", type = "character", default = "bismark", help = "Path to input directory containing methylation files")
+  parser$add_argument("--gtf_file", type = "character", default = "genes.gtf", help = "Path to GTF annotation file")
+  parser$add_argument("--file_type", type = "character", default = "bismark", choices = c("bismark", "methyldackel"), help = "Type of input files")
+  parser$add_argument("--min_coverage", type = "integer", default = 20, help = "Minimum coverage threshold")
+  parser$add_argument("--high_percentile", type = "double", default = 99.9, help = "High percentile for coverage filtering")
+  parser$add_argument("--meth_diff_threshold", type = "double", default = 25, help = "Methylation difference threshold")
+  parser$add_argument("--qval_threshold", type = "double", default = 0.05, help = "Q-value threshold")
+  parser$add_argument("--top_gene_count", type = "integer", default = 10, help = "Number of top genes to select")
+  parser$add_argument("--min_genes_for_enrichment", type = "integer", default = 3, help = "Minimum genes required for enrichment")
+  parser$add_argument("--output_dir", type = "character", default = "./", help = "Output directory")
+  parser$add_argument("--enrichr_databases", type = "character", default = "GO_Molecular_Function_2023,GO_Biological_Process_2023,GO_Cellular_Component_2023,Reactome_2022,WikiPathway_2023_Human,DGIdb_Drug_Targets_2024", help = "Comma-separated list of EnrichR databases")
+  
+  parser$parse_args()
+}
+
+# Function to load and process metadata
+load_metadata <- function(args) {
+  metadata <- read.csv(args$metadata_csv, stringsAsFactors = FALSE) %>%
+    mutate(
+      filename = if (args$file_type == "bismark") {
+        file.path(args$base_dir, paste0(sample, "_trimmed_bismark_bt2.deduplicated.bismark.cov.gz"))
+      } else {
+        file.path(args$base_dir, paste0(sample, ".markdup.sorted_CpG.methylKit"))
+      },
+      condition_inferred = as.numeric(as.factor(cohort)) - 1
+    ) %>%
+    group_by(cohort) %>%
+    mutate(sample.id = paste0(cohort, "_", row_number())) %>%
+    ungroup()
+  
+  # Save cohort mapping
+  unique_mapping <- metadata %>%
+    dplyr::select(cohort, condition_inferred) %>%
+    distinct() %>%
+    arrange(cohort)
+  write.csv(unique_mapping, file.path(args$output_dir, "cohort_to_condition_mapping.csv"), row.names = FALSE)
+  
+  # Compare with original condition column if it exists
+  if ("condition" %in% names(metadata)) {
+    comparison <- metadata %>%
+      dplyr::select(sample, cohort, condition, condition_inferred) %>%
+      mutate(match = condition == condition_inferred)
+    write.csv(comparison, file.path(args$output_dir, "condition_comparison.csv"), row.names = FALSE)
+  }
+  
+  walk(metadata$filename, ~ stopifnot(file.exists(.)))
+  
+  metadata
+}
+
+# Function to process methylation data
+process_methylation_data <- function(metadata, args) {
+  pipeline_type <- if (args$file_type == "bismark") "bismarkCoverage" else "amp"
+  
+  methyl_objs <- mapply(
+    FUN = methRead,
+    location = metadata$filename,
+    sample.id = metadata$sample.id,
+    assembly = metadata$genome,
+    treatment = metadata$condition_inferred,
+    MoreArgs = list(pipeline = pipeline_type, mincov = args$min_coverage),
+    SIMPLIFY = FALSE
+  )
+  
+  myobj <- methylRawList(methyl_objs, treatment = metadata$condition_inferred)
+  filtered <- filterByCoverage(myobj, lo.count = args$min_coverage, hi.perc = args$high_percentile)
+  normed <- normalizeCoverage(filtered, method = "median")
+  methylKit::unite(normed, destrand = FALSE)
+}
+
+# Function to perform PCA
+perform_pca <- function(meth, output_dir) {
+  pca <- PCASamples(meth, obj.return = TRUE)
+  pca_df <- as.data.frame(pca$x) %>%
+    mutate(
+      sample = rownames(.),
+      group = sub("_(\\d+)$", "", sample)
+    )
+  write_csv(pca_df, file.path(output_dir, "pca.csv"))
+}
+
+# Function to perform differential methylation analysis
+perform_differential_methylation <- function(meth) {
+  myDiff <- calculateDiffMeth(meth, overdispersion = "MN", adjust = "BH")
+  getData(myDiff)
+}
+
+# Function to annotate genomic regions
+annotate_regions <- function(diff_df, gtf_file) {
+  gr <- GRanges(
+    seqnames = diff_df$chr,
+    ranges = IRanges(start = diff_df$start, end = diff_df$end),
+    strand = diff_df$strand
+  )
+  
+  txdb <- makeTxDbFromGFF(gtf_file, format = "gtf")
+  genes_tx <- genes(txdb)
+  
+  peakAnno <- annotatePeakInBatch(gr, AnnotationData = genes_tx)
+  gene_symbols <- mapIds(
+    org.Hs.eg.db,
+    keys = as.character(peakAnno$feature),
+    column = "SYMBOL",
+    keytype = "SYMBOL",
+    multiVals = "first"
+  )
+  
+  diff_df$geneSymbol <- NA_character_
+  hits <- findOverlaps(gr, peakAnno)
+  diff_df$geneSymbol[queryHits(hits)] <- gene_symbols[as.character(peakAnno$feature[subjectHits(hits)])]
+  diff_df$geneSymbol <- sapply(diff_df$geneSymbol, paste, collapse = ",")
+  diff_df$geneSymbol[diff_df$geneSymbol == ""] <- NA_character_
+  
+  diff_df
+}
+
+# Function to select top differentially methylated regions
+select_top_regions <- function(diff_df, args) {
+  sig_df <- diff_df %>%
+    filter(abs(meth.diff) >= args$meth_diff_threshold, qvalue < args$qval_threshold)
+  
+  top_hyper <- sig_df %>%
+    arrange(desc(meth.diff)) %>%
+    head(args$top_gene_count)
+  top_hypo <- sig_df %>%
+    arrange(meth.diff) %>%
+    head(args$top_gene_count)
+  
+  list(
+    hyper = top_hyper,
+    hypo = top_hypo,
+    combined = bind_rows(top_hyper, top_hypo)
+  )
+}
+
+# Function to extract methylation data for heatmap
+extract_methylation_for_heatmap <- function(meth, top_regions, output_dir) {
+  sig_regions <- with(top_regions$combined, paste0(chr, "_", start, "_", end))
+  meth_clean <- meth[complete.cases(meth), ]
+  pm <- percMethylation(meth_clean, rowids = TRUE)
+  pm_ids <- gsub("\\.", "_", rownames(pm))
+  subset_pm <- pm[pm_ids %in% sig_regions, ]
+  
+  write.csv(subset_pm, file.path(output_dir, "grapher.csv"), row.names = TRUE)
+}
+
+# Function to run enrichment analysis
+run_enrichment_analysis <- function(genes, label, db_list, out_dir, min_genes) {
+  if (length(genes) < min_genes) {
+    message(sprintf("Skipping enrichment for '%s': only %d gene(s) (minimum required: %d)", label, length(genes), min_genes))
+    return(tibble())
+  }
+  
+  enrich_results <- enrichr(genes, db_list)
+  
+  combined_list <- map(names(enrich_results), function(db_name) {
+    result <- enrich_results[[db_name]]
+    
+    if (is.null(result) || nrow(result) == 0 || all(is.na(result$Term))) {
+      return(tibble())
+    }
+    
+    result %>%
+      as_tibble() %>%
+      filter(!is.na(Term), Term != "", !is.na(Genes), Genes != "") %>%
+      separate_rows(Genes, sep = ";") %>%
+      distinct() %>%
+      dplyr::select(Genes, Term, P.value) %>%
+      dplyr::rename(pvalue = P.value) %>%
+      mutate(Database = db_name)
+  })
+  
+  combined <- bind_rows(combined_list)
+  
+  if (nrow(combined) > 0) {
+    write_csv(combined, file.path(out_dir, paste0("enrichment_", label, "_combined.csv")))
+  }
+  
+  combined
+}
+
+# Main function to orchestrate the pipeline
+main <- function() {
+  args <- get_args()
+  
+  # Create output directory
+  if (!dir.exists(args$output_dir)) {
+    dir.create(args$output_dir, recursive = TRUE)
+  }
+  
+  # Run the pipeline
+  metadata <- load_metadata(args)
+  meth <- process_methylation_data(metadata, args)
+  perform_pca(meth, args$output_dir)
+  diff_df <- perform_differential_methylation(meth)
+  annotated_df <- annotate_regions(diff_df, args$gtf_file)
+  write_csv(annotated_df, file.path(args$output_dir, "volcano.csv"))
+  
+  top_regions <- select_top_regions(annotated_df, args)
+  extract_methylation_for_heatmap(meth, top_regions, args$output_dir)
+  
+  db_vector <- strsplit(args$enrichr_databases, ",")[[1]]
+  
+  run_enrichment_analysis(
+    genes = na.omit(top_regions$hyper$geneSymbol),
+    label = "hyper",
+    db_list = db_vector,
+    out_dir = args$output_dir,
+    min_genes = args$min_genes_for_enrichment
+  )
+  
+  run_enrichment_analysis(
+    genes = na.omit(top_regions$hypo$geneSymbol),
+    label = "hypo",
+    db_list = db_vector,
+    out_dir = args$output_dir,
+    min_genes = args$min_genes_for_enrichment
+  )
+}
+
+# Run the main function
+if (!interactive()) {
+  main()
+}
