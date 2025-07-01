@@ -164,8 +164,9 @@ extract_methylation_for_heatmap <- function(meth, top_regions, output_dir) {
   pm <- percMethylation(meth_clean, rowids = TRUE)
   pm_ids <- gsub("\\.", "_", rownames(pm))
   subset_pm <- pm[pm_ids %in% sig_regions, ]
-  
-  write.csv(subset_pm, file.path(output_dir, "grapher.csv"), row.names = TRUE)
+  rownames(subset_pm) <- sub("^(([^.]+\\.[^.]+))\\..*", "\\1", rownames(subset_pm))
+  subset_pm_df <- data.frame(Symbol = rownames(subset_pm), subset_pm, row.names = NULL)
+  write.csv(subset_pm_df, file.path(output_dir, "grapher.csv"), row.names = FALSE)
 }
 
 # Function to run enrichment analysis
