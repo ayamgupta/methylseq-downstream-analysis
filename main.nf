@@ -12,15 +12,15 @@ def helpMessage() {
     log.info"""
     Usage:
     The typical command for running the pipeline is as follows:
-    nextflow run main.nf --samplesheet samplesheet.csv --input_dir bismark_results/ --gtf genes.gtf
+    nextflow run main.nf --samplesheet samplesheet.csv --gtf genes.gtf
 
     Mandatory arguments:
-      --samplesheet             Path to sample sheet CSV file
-      --input_dir               Path to input directory containing methylation files
+      --samplesheet             Path to sample sheet CSV file (must contain 'path' column)
       --gtf                     Path to GTF annotation file
 
     Optional arguments:
-      --file_type               Type of input files: 'bismark' or 'methyldeckyl' (default: 'bismark')
+      --input_dir               Optional base directory for relative file paths in samplesheet
+      --file_type               Type of input files: 'bismark' or 'methyldackel' (default: 'bismark')
       --outdir                  Output directory (default: './results')
       --min_coverage            Minimum coverage threshold (default: 20)
       --high_percentile         High percentile for coverage filtering (default: 99.9)
@@ -32,6 +32,9 @@ def helpMessage() {
 
     Other options:
       --help                    Show this help message and exit
+
+    Note: The samplesheet must contain 'path' column with individual file paths.
+    If paths are relative, use --input_dir to specify the base directory.
     """.stripIndent()
 }
 
@@ -53,31 +56,10 @@ if (!params.samplesheet) {
     exit 1
 }
 
-if (!params.input_dir) {
-    log.error "Please provide input directory with --input_dir"
-    exit 1
-}
-
 if (!params.gtf) {
     log.error "Please provide GTF file with --gtf"
     exit 1
 }
-
-/*
-========================================================================================
-PARAMETER DEFAULTS
-========================================================================================
-*/
-
-params.file_type = 'bismark'
-params.outdir = './results'
-params.min_coverage = 20
-params.high_percentile = 99.9
-params.meth_diff_threshold = 25
-params.qval_threshold = 0.05
-params.top_gene_count = 10
-params.min_genes_for_enrichment = 3
-params.enrichr_databases = 'GO_Molecular_Function_2023,GO_Biological_Process_2023,GO_Cellular_Component_2023,Reactome_2022,WikiPathway_2023_Human,DGIdb_Drug_Targets_2024'
 
 /*
 ========================================================================================
@@ -87,16 +69,16 @@ WORKFLOWS
 
 workflow {
     
-    // Create channels
+    // Create channels - ensure files exist
     samplesheet_ch = Channel.fromPath(params.samplesheet, checkIfExists: true)
-    input_dir_ch = Channel.fromPath(params.input_dir, type: 'dir', checkIfExists: true)
     gtf_ch = Channel.fromPath(params.gtf, checkIfExists: true)
+    r_script_ch = Channel.fromPath("${projectDir}/bin/methylation_analysis.R", checkIfExists: true)
     
     // Run methylation analysis
     METHYLATION_ANALYSIS(
         samplesheet_ch,
-        input_dir_ch,
-        gtf_ch
+        gtf_ch,
+        r_script_ch
     )
 }
 
@@ -112,8 +94,8 @@ process METHYLATION_ANALYSIS {
     
     input:
     path samplesheet
-    path input_dir
     path gtf
+    path r_script
     
     output:
     path "*.csv", emit: csv_files
@@ -121,17 +103,31 @@ process METHYLATION_ANALYSIS {
     path "enrichment_*.csv", optional: true, emit: enrichment
     
     script:
-    def r_script = "${projectDir}/bin/methylation_analysis.R"
+    def base_dir_arg = params.input_dir ? "--base_dir ${params.input_dir}" : ""
     
     """
-    Rscript ${r_script} --metadata_csv ${samplesheet} --base_dir ${input_dir} --gtf_file ${gtf} --file_type ${params.file_type} --min_coverage ${params.min_coverage} --high_percentile ${params.high_percentile} --meth_diff_threshold ${params.meth_diff_threshold} --qval_threshold ${params.qval_threshold} --top_gene_count ${params.top_gene_count} --min_genes_for_enrichment ${params.min_genes_for_enrichment} --enrichr_databases "${params.enrichr_databases}"
+    Rscript ${r_script} \\
+        --metadata_csv ${samplesheet} \\
+        ${base_dir_arg} \\
+        --gtf_file ${gtf} \\
+        --file_type ${params.file_type} \\
+        --min_coverage ${params.min_coverage} \\
+        --high_percentile ${params.high_percentile} \\
+        --meth_diff_threshold ${params.meth_diff_threshold} \\
+        --qval_threshold ${params.qval_threshold} \\
+        --top_gene_count ${params.top_gene_count} \\
+        --min_genes_for_enrichment ${params.min_genes_for_enrichment} \\
+        --output_dir . \\
+        --enrichr_databases "${params.enrichr_databases}"
     """
     
     stub:
     """
-    touch methylkit_pca_scores.csv
-    touch volcano_input.csv
-    touch heatmap_input.csv
+    touch pca.csv
+    touch volcano.csv
+    touch grapher.csv
+    touch cohort_to_condition_mapping.csv
+    touch condition_comparison.csv
     touch enrichment_hyper_combined.csv
     touch enrichment_hypo_combined.csv
     """

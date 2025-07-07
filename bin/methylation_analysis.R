@@ -22,10 +22,10 @@ get_args <- function() {
   parser <- ArgumentParser(description = "Run methylation analysis pipeline.")
   
   parser$add_argument("--metadata_csv", type = "character", default = "samplesheet.csv", help = "Path to sample sheet CSV file")
-  parser$add_argument("--base_dir", type = "character", default = "bismark", help = "Path to input directory containing methylation files")
+  parser$add_argument("--base_dir", type = "character", default = NULL, help = "Optional base directory to prepend to relative file paths")
   parser$add_argument("--gtf_file", type = "character", default = "genes.gtf", help = "Path to GTF annotation file")
   parser$add_argument("--file_type", type = "character", default = "bismark", choices = c("bismark", "methyldackel"), help = "Type of input files")
-  parser$add_argument("--min_coverage", type = "integer", default = 20, help = "Minimum coverage threshold")
+  parser$add_argument("--min_coverage", type = "integer", default = 10, help = "Minimum coverage threshold")
   parser$add_argument("--high_percentile", type = "double", default = 99.9, help = "High percentile for coverage filtering")
   parser$add_argument("--meth_diff_threshold", type = "double", default = 25, help = "Methylation difference threshold")
   parser$add_argument("--qval_threshold", type = "double", default = 0.05, help = "Q-value threshold")
@@ -39,13 +39,51 @@ get_args <- function() {
 
 # Function to load and process metadata
 load_metadata <- function(args) {
-  metadata <- read.csv(args$metadata_csv, stringsAsFactors = FALSE) %>%
+  metadata <- read.csv(args$metadata_csv, stringsAsFactors = FALSE)
+  
+  # Check for file path column (flexible naming)
+  filepath_col <- NULL
+  if ("path" %in% names(metadata)) {
+    filepath_col <- "path"
+  } else if ("filename" %in% names(metadata)) {
+    filepath_col <- "filename"
+  } else if ("filepath" %in% names(metadata)) {
+    filepath_col <- "filepath"
+  } else {
+    stop("Samplesheet must contain either 'path', 'filename', or 'filepath' column with individual file paths")
+  }
+  
+  # Check for cohort column (flexible naming)
+  cohort_col <- NULL
+  if ("cohort" %in% names(metadata)) {
+    cohort_col <- "cohort"
+  } else if ("group" %in% names(metadata)) {
+    cohort_col <- "group"
+  } else {
+    stop("Samplesheet must contain either 'cohort' or 'group' column for treatment grouping")
+  }
+  
+  # Ensure genome column has values
+  if ("genome" %in% names(metadata) && any(is.na(metadata$genome) | metadata$genome == "")) {
+    warning("Empty genome values found. Setting to 'hg38' as default.")
+    metadata$genome[is.na(metadata$genome) | metadata$genome == ""] <- "hg38"
+  } else if (!("genome" %in% names(metadata))) {
+    warning("No genome column found. Adding 'hg38' as default.")
+    metadata$genome <- "hg38"
+  }
+  
+  metadata <- metadata %>%
     mutate(
-      filename = if (args$file_type == "bismark") {
-        file.path(args$base_dir, paste0(sample, "_trimmed_bismark_bt2.deduplicated.bismark.cov.gz"))
+      # Use the file path from the samplesheet
+      filename = get(filepath_col),
+      # If base_dir is provided and paths are relative, prepend it
+      filename = if (!is.null(args$base_dir) && !all(grepl("^/", filename))) {
+        file.path(args$base_dir, filename)
       } else {
-        file.path(args$base_dir, paste0(sample, ".markdup.sorted_CpG.methylKit"))
+        filename
       },
+      # Use the cohort column (flexible naming)
+      cohort = get(cohort_col),
       condition_inferred = as.numeric(as.factor(cohort)) - 1
     ) %>%
     group_by(cohort) %>%
@@ -67,7 +105,11 @@ load_metadata <- function(args) {
     write.csv(comparison, file.path(args$output_dir, "condition_comparison.csv"), row.names = FALSE)
   }
   
-  walk(metadata$filename, ~ stopifnot(file.exists(.)))
+  # Check if all files exist
+  missing_files <- metadata$filename[!file.exists(metadata$filename)]
+  if (length(missing_files) > 0) {
+    stop(paste("The following files do not exist:", paste(missing_files, collapse = ", ")))
+  }
   
   metadata
 }

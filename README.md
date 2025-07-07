@@ -8,9 +8,9 @@ samplesheet - present in the root dir for testing. This will work with both the 
 
 genes.gtf s3 path - s3://refdata-1/nfcore-pipelines/bio-data/Homo_sapiens/NCBI/GRCh38/Annotation/Genes/genes.gtf
 
-input-bismark-path - s3://quark-demo-platform-data/artifacts/maneesh-invisibl-io/demo/jobs/methylseq-human-6-qqvp5/bismark/methylation_calls/methylation_coverage/
+input-bismark-path - s3://quark-dev-data/quarkdata/home/quark/ayam-invisibl-io/myresults/jobs/methylseq-bismark-b1-tt294/
 
-input-methyldackel-path - s3://artifacts02/artifacts/maneesh-invisibl-io/ds1/jobs/methylseq-m4-q645n/methyldackel/
+input-methyldackel-path - s3://quark-dev-data/quarkdata/home/quark/ayam-invisibl-io/myresults/jobs/methylseq-bwa-b1-9vrg9/
 
 ## Quickstart
 
@@ -32,11 +32,10 @@ input-methyldackel-path - s3://artifacts02/artifacts/maneesh-invisibl-io/ds1/job
     *   `sample`: Sample name
     *   `cohort`: Cohort or group for each sample
     *   `genome`: Genome assembly (e.g., `hg38`)
-*   `--input_dir`: Path to the directory containing methylation data (Bismark coverage or methyldackel output).
 *   `--gtf`: Path to the gene transfer format (GTF) file for gene annotation.
 
 ### Optional
-
+*   `--input_dir`: Path to the directory containing methylation data (Bismark coverage or methyldackel output).
 *   `--file_type`: Type of input files. Choose from `bismark` or `methyldackel`. (Default: `bismark`)
 *   `--outdir`: Output directory for results. (Default: `./results`)
 *   `--min_coverage`: Minimum read coverage to include a CpG site. (Default: `10`)
@@ -75,3 +74,12 @@ nextflow run main.nf \
     --min_coverage 25 \
     --outdir results_methyldackel/
 ```
+
+Tested With the following command
+nextflow run main.nf \
+    --samplesheet methylseq-samplesheet.csv \
+    --gtf genes.gtf \
+    --file_type bismark \
+    --min_coverage 10 \
+    --qval_threshold 0.01 \
+    --outdir results_bismark/

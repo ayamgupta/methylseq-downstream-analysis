@@ -1,0 +1,5 @@
+sample,genome,cohort,sex,status,age,patient,path
+SRR25408121,hg38,AGA,XX,0,18,patient1,/mnt/c/Projects/project1_methylseq/nextflow_template/input/bismark/SRR25408121_trimmed_bismark_bt2.deduplicated.bismark.cov.gz
+SRR25408120,hg38,AGA,XY,0,12,patient2,/mnt/c/Projects/project1_methylseq/nextflow_template/input/bismark/SRR25408120_trimmed_bismark_bt2.deduplicated.bismark.cov.gz
+SRR25408106,hg38,LGA,XX,0,17,patient3,/mnt/c/Projects/project1_methylseq/data/bismark/SRR25408106_trimmed_bismark_bt2.deduplicated.bismark.cov.gz
+SRR25408108,hg38,LGA,XY,0,11,patient4,/mnt/c/Projects/project1_methylseq/data/bismark/SRR25408108_trimmed_bismark_bt2.deduplicated.bismark.cov.gz
