@@ -59,8 +59,10 @@ load_metadata <- function(args) {
     cohort_col <- "cohort"
   } else if ("group" %in% names(metadata)) {
     cohort_col <- "group"
+  } else if ("phenotype" %in% names(metadata)) {
+    cohort_col <- "phenotype"
   } else {
-    stop("Samplesheet must contain either 'cohort' or 'group' column for treatment grouping")
+    stop("Samplesheet must contain either 'cohort', 'group', or 'phenotype' column for treatment grouping")
   }
   
   # Ensure genome column has values
