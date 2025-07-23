@@ -34,7 +34,8 @@ def helpMessage() {
       --help                    Show this help message and exit
 
     Note: The samplesheet must contain 'path' column with individual file paths.
-    If paths are relative, use --input_dir to specify the base directory.
+    Paths can be local files, relative paths, or S3 URLs (s3://).
+    If local paths are relative, use --input_dir to specify the base directory.
     """.stripIndent()
 }
 
@@ -74,12 +75,17 @@ workflow {
     gtf_ch = Channel.fromPath(params.gtf, checkIfExists: true)
     r_script_ch = Channel.fromPath("${projectDir}/bin/methylation_analysis.R", checkIfExists: true)
     
-    // Run methylation analysis
+    // Download S3 files and create updated samplesheet
+    DOWNLOAD_S3_FILES(samplesheet_ch)
+    
+    // Run methylation analysis with updated samplesheet
     METHYLATION_ANALYSIS(
-        samplesheet_ch,
+        DOWNLOAD_S3_FILES.out.updated_samplesheet,
         gtf_ch,
-        r_script_ch
+        r_script_ch,
+        DOWNLOAD_S3_FILES.out.methylkit_files.mix(DOWNLOAD_S3_FILES.out.bismark_files).collect()
     )
+
 }
 
 /*
@@ -87,6 +93,79 @@ workflow {
 PROCESSES
 ========================================================================================
 */
+
+process DOWNLOAD_S3_FILES {
+    tag "download_s3_files"
+    
+    input:
+    path samplesheet
+    
+    output:
+    path "updated_samplesheet.csv", emit: updated_samplesheet
+    path "*.methylKit", optional: true, emit: methylkit_files
+    path "*.bismark.cov.gz", optional: true, emit: bismark_files
+
+    
+    script:
+    """
+    #!/bin/bash
+    
+    # Read the original samplesheet and create updated version
+    head -1 ${samplesheet} > updated_samplesheet.csv
+    
+    # Process each line (skip header) with proper CSV parsing
+    tail -n +2 ${samplesheet} | while IFS= read -r line; do
+        # Remove any trailing whitespace/carriage returns
+        line=\$(echo "\$line" | tr -d '\\r\\n')
+        
+        # Parse CSV line properly
+        IFS=',' read -ra FIELDS <<< "\$line"
+        sample=\${FIELDS[0]}
+        genome=\${FIELDS[1]}
+        cohort=\${FIELDS[2]}
+        sex=\${FIELDS[3]}
+        status=\${FIELDS[4]}
+        age=\${FIELDS[5]}
+        patient=\${FIELDS[6]}
+        path=\${FIELDS[7]}
+        
+        # Trim whitespace from path
+        path=\$(echo "\$path" | sed 's/^[[:space:]]*//;s/[[:space:]]*\$//')
+        
+        echo "Processing: \$sample with path: '\$path'"
+        
+        if [[ \$path == s3://* ]]; then
+            # Extract filename from S3 path
+            filename=\$(basename "\$path")
+            
+            # Check if file exists in S3 first
+            echo "Checking if S3 object exists: \$path"
+            if aws s3 ls "\$path" > /dev/null 2>&1; then
+                echo "Downloading \$path to \$filename"
+                aws s3 cp "\$path" "\$filename"
+                if [ \$? -eq 0 ]; then
+                    echo "Successfully downloaded \$filename"
+                else
+                    echo "Error downloading \$path"
+                    exit 1
+                fi
+            else
+                echo "S3 object does not exist: \$path"
+                echo "Listing contents of parent directory:"
+                parent_dir=\$(dirname "\$path")/
+                aws s3 ls "\$parent_dir" || echo "Cannot list parent directory"
+                exit 1
+            fi
+            
+            # Update the path in samplesheet to local filename
+            echo "\$sample,\$genome,\$cohort,\$sex,\$status,\$age,\$patient,\$filename" >> updated_samplesheet.csv
+        else
+            # Keep original path for non-S3 files
+            echo "\$sample,\$genome,\$cohort,\$sex,\$status,\$age,\$patient,\$path" >> updated_samplesheet.csv
+        fi
+    done
+    """
+}
 
 process METHYLATION_ANALYSIS {
     tag "methylation_analysis"
@@ -96,6 +175,7 @@ process METHYLATION_ANALYSIS {
     path samplesheet
     path gtf
     path r_script
+    path downloaded_files
     
     output:
     path "*.csv", emit: csv_files
